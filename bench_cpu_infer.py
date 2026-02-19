@@ -1,7 +1,10 @@
-"""Train on GPU → export ONNX → infer on CPU-only ONNX Runtime with latency."""
+"""Train on GPU → export ONNX → infer on CPU-only ONNX Runtime with latency.
 
+Runs two model configs: "light" (small) and "heavy" (production-scale).
+"""
+
+import argparse
 import time
-import json
 import numpy as np
 import pandas as pd
 import torch
@@ -10,164 +13,169 @@ import onnxruntime as ort
 from deepctr_torch.inputs import SparseFeat, DenseFeat
 from deepctr_torch.models import DCNMix
 
-# ── 1. Feature definition ──
-sparse_features = ["user_id", "item_id", "category"]
-dense_features = ["price", "rating"]
-all_features = sparse_features + dense_features
+# ── Model configs ──
+CONFIGS = {
+    "light": {
+        "sparse": [
+            SparseFeat("user_id",  vocabulary_size=100,  embedding_dim=8),
+            SparseFeat("item_id",  vocabulary_size=500,  embedding_dim=8),
+            SparseFeat("category", vocabulary_size=20,   embedding_dim=4),
+        ],
+        "dense": [
+            DenseFeat("price",  dimension=1),
+            DenseFeat("rating", dimension=1),
+        ],
+        "cross_num": 2,
+        "dnn_hidden_units": (32, 16),
+    },
+    "heavy": {
+        "sparse": [
+            SparseFeat("user_id",    vocabulary_size=100_000, embedding_dim=64),
+            SparseFeat("item_id",    vocabulary_size=500_000, embedding_dim=64),
+            SparseFeat("category",   vocabulary_size=1_000,   embedding_dim=32),
+            SparseFeat("brand",      vocabulary_size=5_000,   embedding_dim=32),
+            SparseFeat("city",       vocabulary_size=500,     embedding_dim=16),
+            SparseFeat("device",     vocabulary_size=50,      embedding_dim=8),
+            SparseFeat("os",         vocabulary_size=10,      embedding_dim=8),
+            SparseFeat("channel",    vocabulary_size=200,     embedding_dim=16),
+        ],
+        "dense": [
+            DenseFeat("price",       dimension=1),
+            DenseFeat("rating",      dimension=1),
+            DenseFeat("age",         dimension=1),
+            DenseFeat("hist_ctr",    dimension=1),
+            DenseFeat("hist_cvr",    dimension=1),
+            DenseFeat("page_score",  dimension=1),
+        ],
+        "cross_num": 4,
+        "dnn_hidden_units": (512, 256, 128),
+    },
+}
 
-feature_columns = [
-    SparseFeat(name="user_id",  vocabulary_size=100, embedding_dim=8),
-    SparseFeat(name="item_id",  vocabulary_size=500, embedding_dim=8),
-    SparseFeat(name="category", vocabulary_size=20,  embedding_dim=4),
-    DenseFeat(name="price",     dimension=1),
-    DenseFeat(name="rating",    dimension=1),
-]
+VOCAB_CAPS = {
+    "user_id": 100_000, "item_id": 500_000, "category": 1_000,
+    "brand": 5_000, "city": 500, "device": 50, "os": 10, "channel": 200,
+}
 
-# ── 2. Dummy training data ──
-n = 256
-np.random.seed(42)
-data = pd.DataFrame({
-    "user_id":  np.random.randint(0, 100, n),
-    "item_id":  np.random.randint(0, 500, n),
-    "category": np.random.randint(0, 20, n),
-    "price":    np.random.rand(n).astype(np.float32) * 100,
-    "rating":   np.random.rand(n).astype(np.float32) * 5,
-})
-labels = np.random.randint(0, 2, n).astype(np.float32)
 
-# ── 3. Train on GPU ──
-print("=" * 65)
-print("PHASE 1: Train on GPU")
-print("=" * 65)
-model = DCNMix(
-    linear_feature_columns=feature_columns,
-    dnn_feature_columns=feature_columns,
-    cross_num=2,
-    dnn_hidden_units=(32, 16),
-    task="binary",
-    device="cuda",
-)
-model.compile("adam", "binary_crossentropy", metrics=["binary_crossentropy"])
-model_input = {name: data[name].values for name in all_features}
-model.fit(model_input, labels, batch_size=32, epochs=3, verbose=1)
+def run_bench(config_name: str, n_runs: int = 1000):
+    cfg = CONFIGS[config_name]
+    feature_columns = cfg["sparse"] + cfg["dense"]
+    sparse_names = [f.name for f in cfg["sparse"]]
+    dense_names = [f.name for f in cfg["dense"]]
+    all_names = sparse_names + dense_names
 
-# ── 4. Export to ONNX ──
-print("\n" + "=" * 65)
-print("PHASE 2: Export to ONNX")
-print("=" * 65)
-model.eval()
+    # ── Training data ──
+    n = 1024
+    np.random.seed(42)
+    data = {}
+    for sf in cfg["sparse"]:
+        data[sf.name] = np.random.randint(0, sf.vocabulary_size, n)
+    for df in cfg["dense"]:
+        data[df.name] = np.random.rand(n).astype(np.float32)
+    data = pd.DataFrame(data)
+    labels = np.random.randint(0, 2, n).astype(np.float32)
 
-test_data = pd.DataFrame({
-    "user_id":  [0, 50, 99, 1, 42, 77, 10, 88],
-    "item_id":  [0, 250, 499, 3, 100, 400, 55, 321],
-    "category": [0, 10, 19, 5, 2, 15, 8, 11],
-    "price":    [9.99, 0.0, 100.0, 50.5, 25.0, 75.0, 1.0, 99.99],
-    "rating":   [4.5, 0.0, 5.0, 2.5, 3.0, 1.0, 4.0, 3.5],
-})
+    # ── Train on GPU ──
+    print(f"\n{'=' * 65}")
+    print(f"CONFIG: {config_name}")
+    print(f"  Sparse features: {len(sparse_names)}  Dense features: {len(dense_names)}")
+    print(f"  DNN: {cfg['dnn_hidden_units']}  Cross layers: {cfg['cross_num']}")
+    print(f"{'=' * 65}")
 
-tensor_parts = []
-for name in all_features:
-    vals = test_data[name].values
-    dtype = torch.long if name in sparse_features else torch.float32
-    t = torch.tensor(vals, dtype=dtype).unsqueeze(1)
-    tensor_parts.append(t)
-dummy_input = torch.cat([t.float() for t in tensor_parts], dim=-1).to("cuda")
+    print("\n[Train on GPU]")
+    model = DCNMix(
+        linear_feature_columns=feature_columns,
+        dnn_feature_columns=feature_columns,
+        cross_num=cfg["cross_num"],
+        dnn_hidden_units=cfg["dnn_hidden_units"],
+        task="binary",
+        device="cuda",
+    )
+    model.compile("adam", "binary_crossentropy", metrics=["binary_crossentropy"])
+    model_input = {name: data[name].values for name in all_names}
+    model.fit(model_input, labels, batch_size=64, epochs=3, verbose=1)
 
-with torch.no_grad():
-    pt_preds = model(dummy_input).cpu().numpy().flatten()
-print(f"PyTorch (GPU) predictions: {pt_preds}")
+    # ── Export ──
+    model.eval()
+    batch_size_export = 8
+    tensor_parts = []
+    for name in all_names:
+        vals = data[name].values[:batch_size_export]
+        dtype = torch.long if name in sparse_names else torch.float32
+        t = torch.tensor(vals, dtype=dtype).unsqueeze(1)
+        tensor_parts.append(t)
+    dummy_input = torch.cat([t.float() for t in tensor_parts], dim=-1).to("cuda")
 
-onnx_path = "dcnv2_bench.onnx"
-torch.onnx.export(
-    model,
-    dummy_input,
-    onnx_path,
-    input_names=["input"],
-    output_names=["output"],
-    dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
-    opset_version=17,
-    dynamo=False,
-)
-print(f"ONNX exported: {onnx_path}")
+    with torch.no_grad():
+        pt_preds = model(dummy_input).cpu().numpy().flatten()
 
-# ── 5. CPU-only ONNX inference + latency ──
-print("\n" + "=" * 65)
-print("PHASE 3: ONNX CPU-only inference + latency")
-print("=" * 65)
+    onnx_path = f"dcnv2_bench_{config_name}.onnx"
+    torch.onnx.export(
+        model, dummy_input, onnx_path,
+        input_names=["input"], output_names=["output"],
+        dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+        opset_version=17, dynamo=False,
+    )
+    onnx_size_mb = torch.tensor(0).new_empty(0).element_size()  # dummy
+    import os
+    onnx_size_mb = os.path.getsize(onnx_path) / (1024 * 1024)
+    print(f"ONNX exported: {onnx_path} ({onnx_size_mb:.1f} MB)")
 
-sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-print(f"Active providers: {sess.get_providers()}")
+    # count params
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {total_params:,}")
 
-input_name = sess.get_inputs()[0].name
-X = dummy_input.cpu().numpy()
+    # ── CPU inference + latency ──
+    print(f"\n[ONNX CPU-only inference — {n_runs} runs per batch size]")
+    sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    print(f"Active providers: {sess.get_providers()}")
+    input_name = sess.get_inputs()[0].name
 
-# Warmup
-for _ in range(10):
-    sess.run(None, {input_name: X})
+    X_base = dummy_input.cpu().numpy()
 
-# ── Batch inference (batch_size=8) ──
-n_runs = 1000
-times = []
-for _ in range(n_runs):
-    t0 = time.perf_counter()
-    sess.run(None, {input_name: X})
-    times.append(time.perf_counter() - t0)
-times = np.array(times) * 1000  # ms
+    # Verify correctness
+    onnx_preds = sess.run(None, {input_name: X_base})[0].flatten()
+    max_diff = np.abs(pt_preds - onnx_preds).max()
+    print(f"Max diff vs PyTorch GPU: {max_diff:.2e}")
 
-onnx_preds = sess.run(None, {input_name: X})[0].flatten()
-max_diff = np.abs(pt_preds - onnx_preds).max()
+    # Bench various batch sizes
+    batch_sizes = [2, 8, 32, 128, 512, 1024]
+    n_features = X_base.shape[1]
 
-print(f"\nBatch inference (batch_size={X.shape[0]}, {n_runs} runs):")
-print(f"  Mean:   {times.mean():.3f} ms")
-print(f"  Median: {np.median(times):.3f} ms")
-print(f"  P95:    {np.percentile(times, 95):.3f} ms")
-print(f"  P99:    {np.percentile(times, 99):.3f} ms")
-print(f"  Min:    {times.min():.3f} ms")
-print(f"  Max:    {times.max():.3f} ms")
-print(f"  Max diff vs PyTorch: {max_diff:.2e}")
+    print(f"\n{'Batch':>6} {'Mean':>9} {'Median':>9} {'P95':>9} {'P99':>9} {'Min':>9} {'Max':>9}")
+    print("-" * 63)
 
-# ── Single-sample inference (padded to batch=2) ──
-single = X[0:1]
-padded = np.concatenate([single, single], axis=0)
+    for bs in batch_sizes:
+        np.random.seed(0)
+        X = np.random.rand(bs, n_features).astype(np.float32)
+        for i, name in enumerate(all_names):
+            if name in sparse_names:
+                cap = next(sf.vocabulary_size for sf in cfg["sparse"] if sf.name == name)
+                X[:, i] = np.random.randint(0, cap, bs).astype(np.float32)
 
-for _ in range(10):
-    sess.run(None, {input_name: padded})
+        # warmup
+        for _ in range(20):
+            sess.run(None, {input_name: X})
 
-times_single = []
-for _ in range(n_runs):
-    t0 = time.perf_counter()
-    sess.run(None, {input_name: padded})
-    times_single.append(time.perf_counter() - t0)
-times_single = np.array(times_single) * 1000
+        times = []
+        for _ in range(n_runs):
+            t0 = time.perf_counter()
+            sess.run(None, {input_name: X})
+            times.append(time.perf_counter() - t0)
+        t = np.array(times) * 1000
 
-print(f"\nSingle-sample inference (padded to batch=2, {n_runs} runs):")
-print(f"  Mean:   {times_single.mean():.3f} ms")
-print(f"  Median: {np.median(times_single):.3f} ms")
-print(f"  P95:    {np.percentile(times_single, 95):.3f} ms")
-print(f"  P99:    {np.percentile(times_single, 99):.3f} ms")
-print(f"  Min:    {times_single.min():.3f} ms")
-print(f"  Max:    {times_single.max():.3f} ms")
+        print(f"{bs:>6} {t.mean():>8.3f}ms {np.median(t):>8.3f}ms "
+              f"{np.percentile(t, 95):>8.3f}ms {np.percentile(t, 99):>8.3f}ms "
+              f"{t.min():>8.3f}ms {t.max():>8.3f}ms")
 
-# ── Larger batch test ──
-for batch_size in [32, 128, 512, 1024]:
-    np.random.seed(0)
-    X_large = np.random.rand(batch_size, X.shape[1]).astype(np.float32)
-    # Fill sparse cols with valid IDs
-    X_large[:, 0] = np.random.randint(0, 100, batch_size).astype(np.float32)
-    X_large[:, 1] = np.random.randint(0, 500, batch_size).astype(np.float32)
-    X_large[:, 2] = np.random.randint(0, 20, batch_size).astype(np.float32)
 
-    for _ in range(10):
-        sess.run(None, {input_name: X_large})
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", choices=["light", "heavy", "all"], default="all")
+    parser.add_argument("--runs", type=int, default=1000)
+    args = parser.parse_args()
 
-    times_large = []
-    for _ in range(n_runs):
-        t0 = time.perf_counter()
-        sess.run(None, {input_name: X_large})
-        times_large.append(time.perf_counter() - t0)
-    times_large = np.array(times_large) * 1000
-
-    print(f"\nBatch size={batch_size} ({n_runs} runs):")
-    print(f"  Mean:   {times_large.mean():.3f} ms")
-    print(f"  Median: {np.median(times_large):.3f} ms")
-    print(f"  P95:    {np.percentile(times_large, 95):.3f} ms")
+    configs = ["light", "heavy"] if args.config == "all" else [args.config]
+    for cfg in configs:
+        run_bench(cfg, n_runs=args.runs)

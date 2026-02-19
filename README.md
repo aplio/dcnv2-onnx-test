@@ -37,7 +37,10 @@ Dynamo / Legacy TorchScript / torch.jit.trace の 3 種類のエクスポータ�
 ### 4. CPU 推論レイテンシ計測
 
 ```bash
-uv run python bench_cpu_infer.py
+uv run python bench_cpu_infer.py              # light + heavy 両方
+uv run python bench_cpu_infer.py --config light
+uv run python bench_cpu_infer.py --config heavy
+uv run python bench_cpu_infer.py --runs 5000   # 計測回数を変更
 ```
 
 GPU で学習 → ONNX エクスポート → CPU-only onnxruntime で推論し、レイテンシを計測する。
@@ -49,17 +52,52 @@ GPU で学習 → ONNX エクスポート → CPU-only onnxruntime で推論し�
 - 3 種類のエクスポーター全てで変換に成功
 - **batch_size=1 は NG** — CrossNetMix 内部の squeeze で rank が崩れる。batch_size>=2 で使うか、ダミー行でパディングして回避する
 
+## 計測環境
+
+| Component | Spec |
+|---|---|
+| CPU | AMD Ryzen 9 3950X 16-Core (32 threads) @ 4.76 GHz |
+| RAM | 94 GB DDR4 |
+| GPU 0 | NVIDIA GeForce RTX 2060 SUPER (8 GB) |
+| GPU 1 | NVIDIA GeForce RTX 4070 Ti (12 GB) |
+| Driver | 590.48.01 / CUDA 13.1 |
+| OS | Linux 6.17.0-14-generic |
+| Python | 3.12 |
+| PyTorch | 2.10.0+cu126 |
+| ONNX Runtime | 1.24.1 (GPU build, CPU provider で計測) |
+
 ## ONNX CPU 推論レイテンシ
 
-GPU (CUDA) で学習・エクスポートした ONNX モデルを CPU-only onnxruntime で推論した結果 (1000 回実行):
+GPU (CUDA) で学習・エクスポートした ONNX モデルを CPU-only onnxruntime で推論した結果 (1000 回実行)。
+
+### Light モデル (26,393 params / 0.1 MB)
+
+- Sparse: 3 特徴量 (embedding_dim 4–8)
+- Dense: 2 特徴量
+- DNN: (32, 16) / Cross layers: 2
 
 | Batch Size | Mean | Median | P95 | P99 |
 |---:|---:|---:|---:|---:|
-| 1 (pad→2) | 0.130 ms | 0.129 ms | 0.136 ms | 0.140 ms |
-| 8 | 0.221 ms | 0.235 ms | 0.247 ms | 0.252 ms |
-| 32 | 0.701 ms | 0.702 ms | 0.723 ms | — |
-| 128 | 0.932 ms | 0.931 ms | 0.955 ms | — |
-| 512 | 1.949 ms | 1.881 ms | 2.010 ms | — |
-| 1024 | 3.519 ms | 3.355 ms | 4.339 ms | — |
+| 2 | 0.129 ms | 0.128 ms | 0.137 ms | 0.143 ms |
+| 8 | 0.230 ms | 0.229 ms | 0.241 ms | 0.248 ms |
+| 32 | 0.715 ms | 0.711 ms | 0.732 ms | 0.746 ms |
+| 128 | 0.932 ms | 0.929 ms | 0.949 ms | 0.977 ms |
+| 512 | 2.001 ms | 1.888 ms | 2.143 ms | 4.899 ms |
+| 1024 | 4.014 ms | 3.426 ms | 6.386 ms | 7.365 ms |
 
-PyTorch GPU 出力との最大差: 5.96e-08 (float32 精度内)
+### Heavy モデル (39,771,765 params / 151.8 MB)
+
+- Sparse: 8 特徴量 (embedding_dim 8–64, vocab 最大 500k)
+- Dense: 6 特徴量
+- DNN: (512, 256, 128) / Cross layers: 4
+
+| Batch Size | Mean | Median | P95 | P99 |
+|---:|---:|---:|---:|---:|
+| 2 | 0.239 ms | 0.232 ms | 0.279 ms | 0.302 ms |
+| 8 | 0.573 ms | 0.569 ms | 0.614 ms | 0.671 ms |
+| 32 | 1.812 ms | 1.799 ms | 1.842 ms | 1.927 ms |
+| 128 | 3.289 ms | 3.257 ms | 3.333 ms | 3.861 ms |
+| 512 | 7.142 ms | 6.318 ms | 10.294 ms | 13.202 ms |
+| 1024 | 13.895 ms | 12.388 ms | 19.293 ms | 23.692 ms |
+
+両モデルとも PyTorch GPU 出力との最大差: 5.96e-08 (float32 精度内)
