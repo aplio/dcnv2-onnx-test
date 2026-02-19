@@ -39,7 +39,9 @@ print(f"  user_id={int(X[0,0])}, item_id={int(X[0,1])}, "
 print()
 
 # ── 3. Run ONNX inference ──
-sess = ort.InferenceSession("dcnv2.onnx")
+providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+sess = ort.InferenceSession("dcnv2.onnx", providers=providers)
+print(f"ONNX Runtime providers: {sess.get_providers()}")
 
 input_name = sess.get_inputs()[0].name
 input_shape = sess.get_inputs()[0].shape

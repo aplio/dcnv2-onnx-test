@@ -39,7 +39,7 @@ model = DCNMix(
     cross_num=2,
     dnn_hidden_units=(32, 16),
     task="binary",
-    device="cpu",
+    device="cuda",
 )
 model.compile("adam", "binary_crossentropy", metrics=["binary_crossentropy"])
 
@@ -67,15 +67,15 @@ for name in all_features:
     dtype = torch.long if name in sparse_features else torch.float32
     t = torch.tensor(vals, dtype=dtype).unsqueeze(1)
     tensor_parts.append(t)
-dummy_input = torch.cat([t.float() for t in tensor_parts], dim=-1)
+dummy_input = torch.cat([t.float() for t in tensor_parts], dim=-1).to("cuda")
 
 with torch.no_grad():
-    pt_preds = model(dummy_input).numpy().flatten()
+    pt_preds = model(dummy_input).cpu().numpy().flatten()
 
 print(f"\nInput shape: {dummy_input.shape}")
 print(f"PyTorch predictions: {pt_preds}")
 
-# ── 5. Export to ONNX ──
+# ── 5. Export to ONNX (model & input must be on same device) ──
 onnx_path = "dcnv2.onnx"
 torch.onnx.export(
     model,

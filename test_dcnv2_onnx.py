@@ -41,7 +41,7 @@ model = DCNMix(
     cross_num=2,
     dnn_hidden_units=(16, 8),
     task="binary",
-    device="cpu",
+    device="cuda",
 )
 
 model.compile("adam", "binary_crossentropy", metrics=["binary_crossentropy"])
@@ -61,7 +61,7 @@ for name in sparse_features + dense_features:
     if t.dim() == 1:
         t = t.unsqueeze(1)
     test_tensor_list.append(t)
-dummy_input = torch.cat([t.float() for t in test_tensor_list], dim=-1)
+dummy_input = torch.cat([t.float() for t in test_tensor_list], dim=-1).to("cuda")
 
 print(f"Input shape: {dummy_input.shape}")
 print("=" * 60)
@@ -73,13 +73,14 @@ def validate_and_compare(onnx_path, dummy_input, model):
     onnx.checker.check_model(onnx_model)
     print("  ONNX model validation passed.")
 
-    sess = ort.InferenceSession(onnx_path)
-    ort_input = {sess.get_inputs()[0].name: dummy_input.numpy()}
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    sess = ort.InferenceSession(onnx_path, providers=providers)
+    ort_input = {sess.get_inputs()[0].name: dummy_input.cpu().numpy()}
     ort_out = sess.run(None, ort_input)
     print(f"  ONNX inference output: {ort_out[0].flatten()}")
 
     with torch.no_grad():
-        pt_out = model(dummy_input).numpy()
+        pt_out = model(dummy_input).cpu().numpy()
     print(f"  PyTorch output:        {pt_out.flatten()}")
     diff = np.abs(pt_out - ort_out[0]).max()
     print(f"  Max abs diff: {diff:.6e}")
