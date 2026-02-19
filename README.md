@@ -37,10 +37,11 @@ Dynamo / Legacy TorchScript / torch.jit.trace の 3 種類のエクスポータ�
 ### 4. CPU 推論レイテンシ計測
 
 ```bash
-uv run python bench_cpu_infer.py              # light + heavy 両方
+uv run python bench_cpu_infer.py                # light + heavy + 100x100 全部
 uv run python bench_cpu_infer.py --config light
 uv run python bench_cpu_infer.py --config heavy
-uv run python bench_cpu_infer.py --runs 5000   # 計測回数を変更
+uv run python bench_cpu_infer.py --config 100x100
+uv run python bench_cpu_infer.py --runs 5000    # 計測回数を変更
 ```
 
 GPU で学習 → ONNX エクスポート → CPU-only onnxruntime で推論し、レイテンシを計測する。
@@ -100,4 +101,19 @@ GPU (CUDA) で学習・エクスポートした ONNX モデルを CPU-only onnxr
 | 512 | 7.142 ms | 6.318 ms | 10.294 ms | 13.202 ms |
 | 1024 | 13.895 ms | 12.388 ms | 19.293 ms | 23.692 ms |
 
-両モデルとも PyTorch GPU 出力との最大差: 5.96e-08 (float32 精度内)
+### 100x100 モデル (34,541,749 params / 132.0 MB)
+
+- Sparse: 100 特徴量 (embedding_dim 16, vocab 50–100k)
+- Dense: 100 特徴量
+- DNN: (512, 256, 128) / Cross layers: 4
+
+| Batch Size | Mean | Median | P95 | P99 |
+|---:|---:|---:|---:|---:|
+| 2 | 0.868 ms | 0.867 ms | 0.886 ms | 0.894 ms |
+| 8 | 1.339 ms | 1.321 ms | 1.349 ms | 1.539 ms |
+| 32 | 4.160 ms | 4.079 ms | 4.228 ms | 7.086 ms |
+| 128 | 11.408 ms | 10.343 ms | 15.872 ms | 18.695 ms |
+| 512 | 50.635 ms | 49.302 ms | 69.123 ms | 75.071 ms |
+| 1024 | 164.950 ms | 163.909 ms | 198.008 ms | 207.533 ms |
+
+全モデルとも PyTorch GPU 出力との最大差: 5.96e-08 (float32 精度内)

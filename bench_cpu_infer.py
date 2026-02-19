@@ -1,6 +1,6 @@
 """Train on GPU → export ONNX → infer on CPU-only ONNX Runtime with latency.
 
-Runs two model configs: "light" (small) and "heavy" (production-scale).
+Runs model configs: "light", "heavy", and "100x100".
 """
 
 import argparse
@@ -50,11 +50,20 @@ CONFIGS = {
         "cross_num": 4,
         "dnn_hidden_units": (512, 256, 128),
     },
-}
-
-VOCAB_CAPS = {
-    "user_id": 100_000, "item_id": 500_000, "category": 1_000,
-    "brand": 5_000, "city": 500, "device": 50, "os": 10, "channel": 200,
+    "100x100": {
+        "sparse": [
+            SparseFeat(f"s{i:03d}", vocabulary_size=np.random.RandomState(i).choice(
+                [50, 100, 500, 1_000, 5_000, 10_000, 50_000, 100_000]
+            ), embedding_dim=16)
+            for i in range(100)
+        ],
+        "dense": [
+            DenseFeat(f"d{i:03d}", dimension=1)
+            for i in range(100)
+        ],
+        "cross_num": 4,
+        "dnn_hidden_units": (512, 256, 128),
+    },
 }
 
 
@@ -172,10 +181,10 @@ def run_bench(config_name: str, n_runs: int = 1000):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", choices=["light", "heavy", "all"], default="all")
+    parser.add_argument("--config", choices=list(CONFIGS.keys()) + ["all"], default="all")
     parser.add_argument("--runs", type=int, default=1000)
     args = parser.parse_args()
 
-    configs = ["light", "heavy"] if args.config == "all" else [args.config]
+    configs = list(CONFIGS.keys()) if args.config == "all" else [args.config]
     for cfg in configs:
         run_bench(cfg, n_runs=args.runs)
