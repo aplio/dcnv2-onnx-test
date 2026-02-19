@@ -1,0 +1,15 @@
+[project]
+name = "dcnv2-onnx-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "deepctr-torch>=0.2.9",
+    "numpy>=2.4.2",
+    "onnx>=1.20.1",
+    "onnxruntime>=1.24.1",
+    "onnxscript>=0.6.2",
+    "pandas>=3.0.1",
+    "torch>=2.10.0",
+]
