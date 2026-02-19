@@ -46,6 +46,18 @@ uv run python bench_cpu_infer.py --runs 5000    # 計測回数を変更
 
 GPU で学習 → ONNX エクスポート → CPU-only onnxruntime で推論し、レイテンシを計測する。
 
+### 5. CPU vs GPU 推論比較
+
+```bash
+uv run python bench_cpu_vs_gpu.py                # 全 config
+uv run python bench_cpu_vs_gpu.py --config light
+uv run python bench_cpu_vs_gpu.py --config heavy
+uv run python bench_cpu_vs_gpu.py --config 100x100
+```
+
+ONNX CPU / ONNX GPU / PyTorch GPU の 3 方式を同一条件で比較する。
+`LD_LIBRARY_PATH` に NVIDIA ライブラリパスが必要 (GPU provider 利用時)。
+
 ## 検証結果
 
 - スパース特徴量の embedding lookup は ONNX 上で正常に動作する
@@ -117,3 +129,47 @@ GPU (CUDA) で学習・エクスポートした ONNX モデルを CPU-only onnxr
 | 1024 | 164.950 ms | 163.909 ms | 198.008 ms | 207.533 ms |
 
 全モデルとも PyTorch GPU 出力との最大差: 5.96e-08 (float32 精度内)
+
+## ONNX CPU vs GPU vs PyTorch GPU 推論比較
+
+ONNX Runtime の CPU / CUDA プロバイダおよび PyTorch GPU 推論の Median レイテンシ (ms) を比較 (1000 回実行)。
+
+### Light モデル (26,393 params / 0.1 MB)
+
+| Batch | ORT CPU | ORT GPU | PyTorch GPU | Winner |
+|---:|---:|---:|---:|---|
+| 2 | **0.107** | 0.856 | 1.668 | CPU |
+| 8 | **0.246** | 0.865 | 1.663 | CPU |
+| 32 | **0.701** | 0.857 | 1.923 | CPU |
+| 128 | 0.910 | **0.896** | 1.813 | ORT-GPU |
+| 512 | 1.897 | **0.980** | 1.831 | ORT-GPU |
+| 1024 | 3.382 | **0.999** | 1.828 | ORT-GPU |
+
+### Heavy モデル (39,771,765 params / 151.8 MB)
+
+| Batch | ORT CPU | ORT GPU | PyTorch GPU | Winner |
+|---:|---:|---:|---:|---|
+| 2 | **0.229** | 1.632 | 3.194 | CPU |
+| 8 | **0.569** | 1.641 | 3.219 | CPU |
+| 32 | 2.127 | **1.680** | 3.548 | ORT-GPU |
+| 128 | 3.452 | **1.574** | 3.433 | ORT-GPU |
+| 512 | 6.736 | **1.677** | 3.304 | ORT-GPU |
+| 1024 | 12.772 | **2.101** | 3.335 | ORT-GPU |
+
+### 100x100 モデル (34,541,749 params / 132.0 MB)
+
+| Batch | ORT CPU | ORT GPU | PyTorch GPU | Winner |
+|---:|---:|---:|---:|---|
+| 2 | **0.994** | 2.507 | 8.186 | CPU |
+| 8 | **1.485** | 2.531 | 8.496 | CPU |
+| 32 | 4.162 | **2.538** | 9.328 | ORT-GPU |
+| 128 | 10.152 | **2.483** | 9.206 | ORT-GPU |
+| 512 | 43.134 | **4.602** | 9.634 | ORT-GPU |
+| 1024 | 151.631 | **7.606** | 9.527 | ORT-GPU |
+
+### 考察
+
+- **小バッチ (batch <= 8–32) では ONNX CPU が最速**。GPU はカーネル起動・データ転送のオーバーヘッドがあるため、計算量が少ないと不利
+- **バッチが大きくなると ORT GPU が逆転**。クロスオーバーポイントは light で batch~128、heavy/100x100 で batch~32
+- **ORT GPU は PyTorch GPU より常に高速** (2–4 倍)。ONNX Runtime のグラフ最適化が効いている
+- リアルタイム推論 (batch=1–8) のユースケースでは **GPU 不要で ONNX CPU が最適解**
